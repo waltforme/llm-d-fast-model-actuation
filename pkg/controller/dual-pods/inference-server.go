@@ -47,6 +47,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
+	fmav1alpha1 "github.com/llm-d-incubation/llm-d-fast-model-actuation/api/fma/v1alpha1"
 	"github.com/llm-d-incubation/llm-d-fast-model-actuation/pkg/api"
 	stubapi "github.com/llm-d-incubation/llm-d-fast-model-actuation/pkg/spi"
 )
@@ -349,16 +350,33 @@ func (item infSvrItem) process(urCtx context.Context, ctl *controller, nodeDat *
 	}
 	// What remains to be done is to wake or create a server-providing Pod
 
-	serverPatch := requestingPod.Annotations[api.ServerPatchAnnotationName]
-	if serverPatch == "" { // this is bad, somebody has hacked important data
-		return ctl.ensureReqStatus(ctx, requestingPod, serverDat, "the "+api.ServerPatchAnnotationName+" annotation is missing")
-	}
-	// use the server patch to build the server-providing pod, if not already done.
-	desiredProvidingPod, nominalHash, err := serverDat.getNominalServerProvidingPod(ctx, requestingPod, serverPatch, api.ProviderData{
-		NodeName: requestingPod.Spec.NodeName,
-	})
-	if err != nil {
-		return ctl.ensureReqStatus(ctx, requestingPod, serverDat, fmt.Sprintf("failed to construct the nominal server-providing Pod: %s", err.Error()))
+	var desiredProvidingPod *corev1.Pod
+	var nominalHash string
+	if requestingPod.Annotations[api.LauncherConfigAnnotationName] != "" {
+		lcname := requestingPod.Annotations[api.LauncherConfigAnnotationName]
+		lc, err := ctl.lcLister.LauncherConfigs(ctl.namespace).Get(lcname)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctl.ensureReqStatus(ctx, requestingPod, serverDat, fmt.Sprintf("the LauncherConfig %q does not exist", lcname))
+			}
+			return ctl.ensureReqStatus(ctx, requestingPod, serverDat, fmt.Sprintf("failed to get the LauncherConfig %q: %s", lcname, err.Error()))
+		}
+		desiredProvidingPod, nominalHash, err = serverDat.getNominalServerProvidingPodFromLC(ctx, requestingPod, *lc)
+		if err != nil {
+			return ctl.ensureReqStatus(ctx, requestingPod, serverDat, fmt.Sprintf("failed to construct the nominal server-providing Pod from LauncherConfig %q: %s", lcname, err.Error()))
+		}
+	} else {
+		serverPatch := requestingPod.Annotations[api.ServerPatchAnnotationName]
+		if serverPatch == "" { // this is bad, somebody has hacked important data
+			return ctl.ensureReqStatus(ctx, requestingPod, serverDat, "the "+api.ServerPatchAnnotationName+" annotation is missing")
+		}
+		// use the server patch to build the server-providing pod, if not already done.
+		desiredProvidingPod, nominalHash, err = serverDat.getNominalServerProvidingPod(ctx, requestingPod, serverPatch, api.ProviderData{
+			NodeName: requestingPod.Spec.NodeName,
+		})
+		if err != nil {
+			return ctl.ensureReqStatus(ctx, requestingPod, serverDat, fmt.Sprintf("failed to construct the nominal server-providing Pod: %s", err.Error()))
+		}
 	}
 
 	sleepingAnys, err := ctl.podInformer.GetIndexer().ByIndex(nominalHashIndexName, nominalHash)
@@ -804,6 +822,45 @@ func (serverDat *serverData) getNominalServerProvidingPod(ctx context.Context, r
 		pod.Annotations[api.AcceleratorsAnnotationName] = *serverDat.GPUIDsStr
 		pod.Labels = MapSet(pod.Labels, api.DualLabelName, reqPod.Name)
 		pod.Labels[api.SleepingLabelName] = "false"
+		serverDat.NominalProvidingPod = pod
+		serverDat.NominalProvidingPodHash = nominalHash
+	}
+	return serverDat.NominalProvidingPod, serverDat.NominalProvidingPodHash, nil
+}
+
+func (serverDat *serverData) getNominalServerProvidingPodFromLC(ctx context.Context, reqPod *corev1.Pod, lc fmav1alpha1.LauncherConfig) (*corev1.Pod, string, error) {
+	logger := klog.FromContext(ctx)
+	if serverDat.NominalProvidingPod == nil {
+		podSpec := lc.Spec.PodTemplate.Spec
+		podSpec = *deIndividualize(podSpec.DeepCopy())
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: lc.Spec.PodTemplate.Labels,
+			},
+			Spec: podSpec,
+		}
+		hasher := sha256.New()
+		podJSON, err := json.Marshal(pod)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to marshal launcher config pod spec: %w", err)
+		}
+		hasher.Write(podJSON)
+		var modifiedHash [sha256.Size]byte
+		modifiedHashSl := hasher.Sum(modifiedHash[:0])
+		nominalHash := base64.RawStdEncoding.EncodeToString(modifiedHashSl)
+
+		logger.V(5).Info("Computed nominalHash from LauncherConfig", "nominalHash", nominalHash, "podJSON", podJSON)
+
+		serverDat.NominalProvidingPod = pod
+		serverDat.NominalProvidingPodHash = nominalHash
+
+		pod.GenerateName = reqPod.Name + "-dual-"
+		// pod.Finalizers = append(pod.Finalizers, providerFinalizer)
+		// pod.Annotations = MapSet(pod.Annotations, nominalHashAnnotationKey, nominalHash)
+		// pod.Annotations[requesterAnnotationKey] = string(reqPod.UID) + " " + reqPod.Name
+		// pod.Annotations[api.AcceleratorsAnnotationName] = *serverDat.GPUIDsStr
+		// pod.Labels = MapSet(pod.Labels, api.DualLabelName, reqPod.Name)
+		// pod.Labels[api.SleepingLabelName] = "false"
 		serverDat.NominalProvidingPod = pod
 		serverDat.NominalProvidingPodHash = nominalHash
 	}
