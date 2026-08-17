@@ -128,8 +128,8 @@ const InstanceLabelName string = "dual-pods.llm-d.ai/instance"
 // (it does not rely on this label for anything).
 const SleepingLabelName string = "dual-pods.llm-d.ai/sleeping"
 
-// SleepState is what HTTP GET /is_sleeping on an inference server
+// SuspendState is what HTTP GET /is_suspended on an inference server
 // returns (as JSON).
-type SleepState struct {
-	IsSleeping bool `json:"is_sleeping"`
+type SuspendState struct {
+	IsSuspended bool `json:"is_suspended"`
 }

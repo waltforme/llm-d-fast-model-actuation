@@ -469,7 +469,7 @@ func (item infSvrItem) process(urCtx context.Context, ctl *controller, nodeDat *
 						logger.V(2).Info("Bound instance not found in launcher, treating as dead")
 					}
 					// Mark as sleeping so that ensureUnbound (called during requester deletion)
-					// does not attempt to POST /sleep on the dead instance.
+					// does not attempt to POST /suspend on the dead instance.
 					serverDat.Sleeping = ptr.To(true)
 					delStart := time.Now()
 					err = podOps.Delete(ctx, requestingPod.Name, metav1.DeleteOptions{
@@ -1494,7 +1494,7 @@ func (ctl *controller) wakeUp(ctx context.Context, serverDat *serverData, reques
 		}
 	}
 	endpoint := fmt.Sprintf("%s:%d", providingPod.Status.PodIP, serverPort)
-	wakeURL := "http://" + endpoint + "/wake_up"
+	wakeURL := "http://" + endpoint + "/resume"
 	_, err := doHTTP(ctx, "wake", "POST", wakeURL, ctl.httpLatencySecsHistograms.MustCurryWith(prometheus.Labels{"isc_name": requestingPod.Annotations[api.InferenceServerConfigAnnotationName]}), nil, nil)
 	if err != nil {
 		return fmt.Errorf("failed to wake inference server at %s: %w", endpoint, err)
@@ -1709,7 +1709,7 @@ func (ctl *controller) ensureUnbound(ctx context.Context, serverDat *serverData,
 				}
 			}
 			endpoint := fmt.Sprintf("%s:%d", providingPod.Status.PodIP, serverPort)
-			sleepURL := "http://" + endpoint + "/sleep"
+			sleepURL := "http://" + endpoint + "/suspend"
 			_, err := doHTTP(ctx, "sleep", "POST", sleepURL, ctl.httpLatencySecsHistograms.MustCurryWith(prometheus.Labels{"isc_name": iscName}), nil, nil)
 			if err != nil {
 				return fmt.Errorf("failed to put provider %q to sleep, POST %s: %w", serverDat.ProvidingPodName, sleepURL, err)
@@ -1982,10 +1982,10 @@ func getReducedInferenceContainerState(from *corev1.Pod) *reducedContainerState 
 }
 
 func (ctl *controller) querySleeping(ctx context.Context, iscName string, providingPod *corev1.Pod, serverPort int32) (bool, error) {
-	queryURL := fmt.Sprintf("http://%s:%d/is_sleeping", providingPod.Status.PodIP, serverPort)
-	var sleepState api.SleepState
-	_, err := doHTTP(ctx, "query_sleeping", "GET", queryURL, ctl.httpLatencySecsHistograms.MustCurryWith(prometheus.Labels{"isc_name": iscName}), nil, &sleepState)
-	return sleepState.IsSleeping, err
+	queryURL := fmt.Sprintf("http://%s:%d/is_suspended", providingPod.Status.PodIP, serverPort)
+	var suspendState api.SuspendState
+	_, err := doHTTP(ctx, "query_sleeping", "GET", queryURL, ctl.httpLatencySecsHistograms.MustCurryWith(prometheus.Labels{"isc_name": iscName}), nil, &suspendState)
+	return suspendState.IsSuspended, err
 }
 
 func (ctl *controller) accelMemoryIsLowEnough(ctx context.Context, requestingPod *corev1.Pod, serverDat *serverData) error {

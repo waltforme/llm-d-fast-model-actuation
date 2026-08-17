@@ -7,13 +7,13 @@ HTTP requests.
   server's lifetime, a 200 otherwise. The startup delay is specified
   on the command line.
 
-- `GET /is_sleeping`: responds with a 200 status code and the JSON
-  representation of the current `sleepState` defined in [the
+- `GET /is_suspended`: responds with a 200 status code and the JSON
+  representation of the current suspend state defined in [the
   code](main.go).
 
-- `POST /sleep`: sets the "is-sleeping" bit to true.
+- `POST /suspend`: sets the "is-suspended" bit to true.
 
-- `POST /wake_up`: sets the "is-sleeping" bit to false, which is the
+- `POST /resume`: sets the "is-suspended" bit to false, which is the
   initial state.
 
 ## Requester specific arguments

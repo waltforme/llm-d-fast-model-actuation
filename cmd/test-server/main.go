@@ -66,8 +66,8 @@ func main() {
 			_, _ = fmt.Fprintf(w, "Service Unavailable until %s\n", healthyTimeStr)
 		}
 	})
-	mux.HandleFunc("GET /is_sleeping", func(w http.ResponseWriter, r *http.Request) {
-		ss := api.SleepState{IsSleeping: sleeping.Load()}
+	mux.HandleFunc("GET /is_suspended", func(w http.ResponseWriter, r *http.Request) {
+		ss := api.SuspendState{IsSuspended: sleeping.Load()}
 		ssBytes, err := json.Marshal(&ss)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -79,12 +79,12 @@ func main() {
 			_, _ = w.Write(ssBytes)
 		}
 	})
-	mux.HandleFunc("POST /sleep", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /suspend", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // not strictly necessary, but explicit
 		sleeping.Store(true)
 		logger.Info("Set sleeping=true")
 	})
-	mux.HandleFunc("POST /wake_up", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // not strictly necessary, but explicit
 		sleeping.Store(false)
 		logger.Info("Set sleeping=false")
