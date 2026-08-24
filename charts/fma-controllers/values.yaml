@@ -32,6 +32,14 @@ dualPodsController:
   # This involves querying the requester;
   # the test-requester does not support the query.
   debugAcceleratorMemory: false
+  # Collect Go coverage data from the controller. When enabled, this mounts a
+  # PersistentVolumeClaim, sets GOCOVERDIR on the controller, and deploys the
+  # coverdata inspector. It therefore requires the cluster to have a
+  # StorageClass / PersistentVolume that can satisfy the claim.
+  # Disable in clusters without dynamic storage provisioning (e.g. a simple
+  # single-node demo VM) to avoid an unschedulable, Pending PVC.
+  coverage:
+    enabled: true
 
 # Launcher populator controller configuration
 launcherPopulator:

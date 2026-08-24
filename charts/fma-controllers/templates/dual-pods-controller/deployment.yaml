@@ -1,5 +1,6 @@
 # This file has been modified with the assistance of Claude Opus 4.6
 {{- if .Values.dualPodsController.enabled }}
+{{- if .Values.dualPodsController.coverage.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -11,6 +12,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -44,21 +46,28 @@ spec:
         - "--namespace={{ .Release.Namespace }}"
         - "--sleeper-limit={{ .Values.dualPodsController.sleeperLimit }}"
         - "--debug-accelerator-memory={{ .Values.dualPodsController.debugAcceleratorMemory }}"
+        {{- if .Values.dualPodsController.coverage.enabled }}
         env:
         - name: GOCOVERDIR
           value: /var/coverdata
+        {{- end }}
         ports:
         - containerPort: 8002
           name: metrics
           protocol: TCP
+        {{- if .Values.dualPodsController.coverage.enabled }}
         volumeMounts:
         - name: coverdata
           mountPath: "/var/coverdata"
+        {{- end }}
       serviceAccountName: {{ .Release.Name }}-fma-controllers
+      {{- if .Values.dualPodsController.coverage.enabled }}
       volumes:
       - name: coverdata
         persistentVolumeClaim:
           claimName: "{{ .Release.Name }}-coverdata-dual-pods-controller"
+      {{- end }}
+{{- if .Values.dualPodsController.coverage.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -96,4 +105,5 @@ spec:
       - name: coverdata
         persistentVolumeClaim:
           claimName: "{{ .Release.Name }}-coverdata-dual-pods-controller"
+{{- end }}
 {{- end }}

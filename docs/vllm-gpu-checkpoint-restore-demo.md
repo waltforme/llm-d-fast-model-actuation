@@ -71,7 +71,7 @@ populator image at the `adopt-vllm-gpucr` tag.
 export CONTAINER_IMG_REG=quay.io/junatibm/fma
 export IMAGE_TAG=adopt-vllm-gpucr
 export LAUNCHER_IMAGE=${CONTAINER_IMG_REG}/launcher:${IMAGE_TAG}
-export REQUESTER_IMAGE=${CONTAINER_IMG_REG}/requester:latest   # adjust to a tag you have
+export REQUESTER_IMAGE=${CONTAINER_IMG_REG}/requester:${IMAGE_TAG}
 export NS=default                                              # namespace for the demo
 export MODEL=Qwen/Qwen2.5-0.5B-Instruct                        # small enough for a 24 GiB L4
 export VLLM_PORT=8000                                          # the vLLM instance port (ISC port)
@@ -91,31 +91,24 @@ This publishes `quay.io/junatibm/fma/dual-pods-controller:adopt-vllm-gpucr`
 (`ko build` builds and pushes). Verify the tag exists in the registry before
 continuing.
 
-If you also need a requester image, build and push it (otherwise reuse an
-existing tag and skip this):
+Build and push the requester image. Note the requester target reads its tag from
+`REQUESTER_IMG_TAG` (default `latest`), **not** `IMAGE_TAG` — passing `IMAGE_TAG`
+here has no effect and would build `requester:latest`:
 
 ```shell
-make build-requester CONTAINER_IMG_REG=${CONTAINER_IMG_REG} IMAGE_TAG=${IMAGE_TAG}
-make push-requester  CONTAINER_IMG_REG=${CONTAINER_IMG_REG} IMAGE_TAG=${IMAGE_TAG}
-export REQUESTER_IMAGE=${CONTAINER_IMG_REG}/requester:${IMAGE_TAG}
+make build-requester CONTAINER_IMG_REG=${CONTAINER_IMG_REG} REQUESTER_IMG_TAG=${IMAGE_TAG}
+make push-requester  CONTAINER_IMG_REG=${CONTAINER_IMG_REG} REQUESTER_IMG_TAG=${IMAGE_TAG}
 ```
 
 ---
 
 ## Step 1 — Cluster preparation
 
-Point `kubectl` at the demo cluster, then populate the `gpu-map` ConfigMap that
-FMA uses to map physical GPUs on each node:
-
-```shell
-scripts/ensure-nodes-mapped.sh
-```
-
 Install the FMA CRDs (the install script in Step 2 can also do this via
 `--install-crds true`, shown below):
 
 ```shell
-kubectl apply -f config/crds.yaml
+kubectl apply --server-side -f config/crds.yaml
 ```
 
 Optionally install the ValidatingAdmissionPolicy objects (not required for
@@ -125,40 +118,83 @@ correct functioning):
 kubectl apply -f config/validating-admission-policies.yaml
 ```
 
+Install the NVIDIA GPU Operator if not present.
+```shell
+helm install --wait --generate-name \
+    -n gpu-operator --create-namespace \
+    nvidia/gpu-operator \
+    --version=v26.3.3 \
+    --set cdi.enabled=false
+```
+
 ---
 
 ## Step 2 — Deploy the modified FMA controllers
 
-Deploy the chart with the modified controller image and the launcher-populator
-**disabled**:
+Deploy the chart with the modified controller image, the launcher-populator
+**disabled**, coverage-data collection **disabled**, and a pullable image
+policy for the controller.
+
+> **Disable coverage on a demo VM.** By default the chart mounts a
+> PersistentVolumeClaim for Go coverage data (`GOCOVERDIR`) and deploys a
+> coverdata inspector. A single-node demo VM usually has no StorageClass, so
+> that PVC stays `Pending` and the controller Pod never schedules. Setting
+> `dualPodsController.coverage.enabled=false` drops the PVC, the mount, and the
+> inspector. (The controller binary is `-cover`-instrumented but runs normally
+> without `GOCOVERDIR`; it just emits no coverage.)
+
+> **Set `global.local=false`.** `install-fma.sh`'s non-release path forces
+> `global.local=true`, which sets the controller's `imagePullPolicy` to `Never`
+> — correct for a `kind` cluster with side-loaded images, wrong for a demo that
+> pulls the controller from quay.io (the Pod would fail `ErrImageNeverPull`).
+> Override it with `--chart-set global.local=false` so the policy becomes
+> `Always`. (`install-fma.sh` appends `--chart-set` values after its own
+> `--set`, and the later value wins.) The launcher and requester Pods set their
+> own `imagePullPolicy: Always` in later steps, so only the controller is
+> affected.
 
 ```shell
 scripts/install-fma.sh \
   --image-tag "${IMAGE_TAG}" \
   --oci-registry "${CONTAINER_IMG_REG}" \
   --enable-launcher-populator false \
-  --install-crds true \
-  --install-admission-policies true \
+  --install-crds false \
+  --install-admission-policies false \
   --ensure-node-view-cluster-role node-viewer \
-  --chart-set dualPodsController.sleeperLimit=1
+  --chart-set global.local=false \
+  --chart-set dualPodsController.sleeperLimit=1 \
+  --chart-set dualPodsController.coverage.enabled=false
 ```
 
-Equivalent raw Helm invocation, if you prefer:
+What each option does:
 
-```shell
-helm upgrade --install fma charts/fma-controllers \
-  --set global.imageRegistry="${CONTAINER_IMG_REG}" \
-  --set global.imageTag="${IMAGE_TAG}" \
-  --set launcherPopulator.enabled=false \
-  --set dualPodsController.sleeperLimit=1
-```
+- `--image-tag` / `--oci-registry` — **required**; select the demo images and
+  the local chart.
+- `--install-crds false` — the CRDs were already installed in Step 1, so the
+  script does not re-apply them. (Pass `true` to install them here instead, and
+  then drop the CRD step in Step 1.)
+- `--install-admission-policies false` — the ValidatingAdmissionPolicy objects
+  are **not required** for the demo. Pass `true` if you want them.
+- `--enable-launcher-populator false` — the demo does not use the populator; the
+  dual-pods controller creates launchers reactively.
+- `--ensure-node-view-cluster-role node-viewer` — **required**; the controller
+  runs a Node informer, so it needs a ClusterRole granting `get`/`list`/`watch`
+  on Nodes. This creates/updates one named `node-viewer` and binds it.
+- `--chart-set global.local=false` — pull the controller image (see the note
+  above).
+- `--chart-set dualPodsController.sleeperLimit=1` — allow at most one suspended
+  server per GPU.
+- `--chart-set dualPodsController.coverage.enabled=false` — disable the coverage
+  PVC (see the note above).
 
-Confirm the dual-pods controller is running and using the demo image:
+Confirm the dual-pods controller is running, using the demo image, and set to
+pull it:
 
 ```shell
 kubectl -n "${NS}" get deploy -l app.kubernetes.io/name=fma-controllers
-kubectl -n "${NS}" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}' \
-  | grep dual-pods-controller
+kubectl -n "${NS}" get deploy fma-dual-pods-controller \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\t"}{.spec.template.spec.containers[0].imagePullPolicy}{"\n"}'
+# => quay.io/junatibm/fma/dual-pods-controller:adopt-vllm-gpucr   Always
 ```
 
 ---
@@ -311,10 +347,14 @@ EOF
 ```
 
 In response, FMA creates a launcher Pod and a launcher-hosted vLLM instance.
-This is the **cold start**. Watch the Pods:
+This is the **cold start**. Watch the Pods. The `SUSPENDED` column is the
+`dual-pods.llm-d.ai/sleeping` label, renamed for display via `custom-columns`
+(`-L` would label the column `SLEEPING`, after the label key, and cannot rename
+it):
 
 ```shell
-kubectl -n "${NS}" get pods -L dual-pods.llm-d.ai/dual,dual-pods.llm-d.ai/sleeping -w
+kubectl -n "${NS}" get pods -w \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,DUAL:.metadata.labels.dual-pods\.llm-d\.ai/dual,SUSPENDED:.metadata.labels.dual-pods\.llm-d\.ai/sleeping'
 ```
 
 Wait for the server-requesting Pod to become READY (readiness is relayed from
@@ -340,7 +380,8 @@ echo "launcher pod: ${LAUNCHER_POD}"
 kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- \
   curl -s localhost:${VLLM_PORT}/v1/completions \
   -H 'Content-Type: application/json' \
-  -d "{\"model\":\"${MODEL}\",\"prompt\":\"The capital of France is\",\"max_tokens\":16,\"temperature\":0}"
+  -d "{\"model\":\"${MODEL}\",\"prompt\":\"The capital of France is\",\"max_tokens\":16,\"temperature\":0}" \
+  | jq
 
 # Suspend state should be false.
 kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- \
@@ -348,7 +389,7 @@ kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- \
 # => {"is_suspended":false}
 
 # nvidia-smi should show the vLLM process holding GPU memory.
-kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- nvidia-smi
+nvidia-smi
 ```
 
 ---
@@ -372,10 +413,12 @@ kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- \
 # => {"is_suspended":true}
 
 # nvidia-smi should show the GPU memory released (no vLLM process).
-kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- nvidia-smi
+nvidia-smi
 
-# The controller also reflects this on the launcher Pod's label.
-kubectl -n "${NS}" get pod "${LAUNCHER_POD}" -L dual-pods.llm-d.ai/sleeping
+# The controller also reflects this on the launcher Pod's label
+# (SUSPENDED column = the dual-pods.llm-d.ai/sleeping label).
+kubectl -n "${NS}" get pod "${LAUNCHER_POD}" \
+  -o custom-columns='NAME:.metadata.name,SUSPENDED:.metadata.labels.dual-pods\.llm-d\.ai/sleeping'
 ```
 
 ---
@@ -406,13 +449,14 @@ export LAUNCHER_POD=$(kubectl -n "${NS}" get pods \
 kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- \
   curl -s localhost:${VLLM_PORT}/v1/completions \
   -H 'Content-Type: application/json' \
-  -d "{\"model\":\"${MODEL}\",\"prompt\":\"The capital of France is\",\"max_tokens\":16,\"temperature\":0}"
+  -d "{\"model\":\"${MODEL}\",\"prompt\":\"The capital of France is\",\"max_tokens\":16,\"temperature\":0}" \
+  | jq
 
 kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- \
   curl -s localhost:${VLLM_PORT}/is_suspended
 # => {"is_suspended":false}
 
-kubectl -n "${NS}" exec "${LAUNCHER_POD}" -c inference-server -- nvidia-smi
+nvidia-smi
 ```
 
 Because the response was produced with `temperature 0`, the completion text
@@ -435,6 +479,7 @@ instance to a working state.
 
 ```shell
 kubectl -n "${NS}" delete rs/gpucr-request
+kubectl -n "${NS}" delete pod ${LAUNCHER_POD}
 kubectl -n "${NS}" delete inferenceserverconfig/gpucr-isc launcherconfig/gpucr-lc
 kubectl -n "${NS}" delete rolebinding/gpucr-launcher-pod-state-writer \
   role/gpucr-launcher-pod-state-writer sa/gpucr-launcher
@@ -451,11 +496,10 @@ helm uninstall fma
   stock image speaks `/sleep`, `/wake_up`, `/is_sleeping`.
 - **Launcher Pod never appears.** The dual-pods controller creates it reactively
   from the requester Pod. Check controller logs and that the requester's
-  `dual-pods.llm-d.ai/inference-server-config` annotation names the ISC, and that
-  `gpu-map` is populated (Step 1).
+  `dual-pods.llm-d.ai/inference-server-config` annotation names the ISC.
 - **`nvidia-smi` still shows memory after suspend.** Give the checkpoint a few
   more seconds and re-check `/is_suspended`; the label
-  `dual-pods.llm-d.ai/sleeping=true` on the launcher Pod confirms the controller
-  believes the instance is suspended.
+  `dual-pods.llm-d.ai/sleeping=true` on the launcher Pod (the `SUSPENDED` column
+  above) confirms the controller believes the instance is suspended.
 - **Model does not fit on the L4.** Use a smaller model or lower
   `--gpu-memory-utilization` in the ISC options.
